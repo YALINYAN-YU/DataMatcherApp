@@ -1,0 +1,361 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox
+import pandas as pd
+# import dask.dataframe as dd
+import pyodbc
+from openpyxl import Workbook
+from openpyxl.styles import PatternFill
+from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.styles import Font
+
+
+# SQL Server connection parameters
+server = '10.88.***.***'  # SQL Server服务器名: 
+database = 'Wa****P*T'  # 数据库名
+username = 'po****ch'  # 用户名
+password = '***masked***'  #密码
+
+# 建立SQL Server连接
+def connect_to_sql():
+    try:
+        conn = pyodbc.connect(f"DRIVER={{SQL Server}};SERVER={server};DATABASE={database};UID={username};PWD={password}")
+        return conn
+    except Exception as e:
+        messagebox.showerror("Database Connection Error", f"Error connecting to the database: {e}")
+        return None
+
+# GUI Application
+class DataMatcherApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Data Matcher Application")
+        # Set window size
+        self.root.geometry("900x500")
+
+        # Instruction label
+        instruction_label = tk.Label(
+            root,
+            text="使用說明：先進行第一步，彈窗提示數據上傳成功後，再根據提示進行第二步。第二步完成後，再根據提示進行最後的第三步。如有錯誤，請截圖報錯內容並郵寄至 yaliny@tawa.com",
+            font=("Helvetica", 12),
+            wraplength=400,  # Wrap text within 400px
+            justify="left"
+        )
+        instruction_label.pack(pady=10)
+
+        # Variables to store file paths and data
+        self.promo_batch_path = None
+        self.promo_batch_df1 = None  # 用于存储 promo_batch_df1 数据
+        self.extracted_data = None
+        self.output_file = None  # 用于存储生成的文件名
+
+        # Upload button
+        self.upload_button = tk.Button(root, text="Step1: Upload File", command=self.upload_file, width=30, height=2)
+        self.upload_button.pack(pady=10)
+
+        # Label to display file path
+        self.file_path_label = tk.Label(root, text="", font=("Helvetica", 10), fg="blue")
+        self.file_path_label.pack(pady=5)
+
+        # Match UPC button
+        self.match_button = tk.Button(root, text="Step2: Match UPC", command=self.match_upc, width=30, height=2)
+        self.match_button.pack(pady=10)
+
+        # 新增的Label，用于显示C1和C2,C3 信息
+        self.match_result_label = tk.Label(root, text="", font=("Helvetica", 10), fg="blue")
+        self.match_result_label.pack(pady=5)  # 确保在 match_button 下方
+
+        # Download button
+        self.download_button = tk.Button(root, text="Step3: Download File", command=self.download_file, width=30, height=2)
+        self.download_button.pack(pady=10)
+
+        # 新增的Label，用于说明结果文件的颜色标签含义
+        self.download_result_label = tk.Label(root, text="", font=("Helvetica", 10), fg="blue")
+        self.download_result_label.pack(pady=5)  # 确保在 download_button 下方
+
+    def upload_file(self):
+        # 清空上一次文件路径标签和匹配结果标签的内容
+        self.file_path_label.config(text="")
+        self.match_result_label.config(text="")
+        self.download_result_label.config(text="")
+        # 打开文件选择对话框
+        self.promo_batch_path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx *.xls")])
+        if self.promo_batch_path:
+            self.file_path_label.config(text=f"即將處理文件: {self.promo_batch_path}")
+            messagebox.showinfo("File Uploaded", f"File successfully uploaded: {self.promo_batch_path}\nYou can go to Step2 now!")
+
+    def match_upc(self):
+        if not self.promo_batch_path:
+            messagebox.showwarning("No File Uploaded", "Please upload the promo_batch file first.")
+            return
+
+        try:
+            # 读取上传的Excel文件
+            promo_batch_df = pd.read_excel(self.promo_batch_path, dtype={'UPC': str})  # 局部变量
+            self.promo_batch_df1 = promo_batch_df.copy()  # 复制到类属性，以便后续使用
+
+            promo_batch_df.columns = promo_batch_df.columns.str.strip()
+            promo_batch_df['UPC'] = promo_batch_df['UPC'].astype(str)
+
+            promo_batch_df['Target'] = promo_batch_df['Target'].astype(str) #确保数据类型一致
+            promo_batch_df['Target'] = promo_batch_df['Target'].str.strip().str.upper() # 将Target转换为大写并去掉前后空格
+            # print(list(promo_batch_df.columns))
+            # print(promo_batch_df.head(10))
+
+            promo_batch_df = promo_batch_df[['UPC', 'PromotionPrice', 'Qty', 'Start Date', 'End Date', 'Target', 'Note', 'Mix Match', 'PkgPrice', 'PkgQty']]
+            promo_batch_df = promo_batch_df.rename(columns={
+                'Start Date': 'StartDate',
+                'End Date': 'EndDate'
+                })
+            # print(list(promo_batch_df.columns))
+
+            # print(promo_batch_df.head(10))
+
+
+            # 从SQL Server获取master_data
+            conn = connect_to_sql()
+            if conn:
+                master_data_df = pd.read_sql_query("SELECT Article, UPC, DescrEN, DescrZH, PkSize, CheckDigit FROM [dbo].[vTawaPOSItemUPCInfo]", conn)
+                master_data_df['UPC'] = master_data_df['UPC'].astype(str)
+                # print(master_data_df.head(10))
+
+                # targetStore_df_1 = pd.read_sql_query("SELECT TargetGroup, Target FROM [dbo].[vTawaPOSBatchTarget]", conn)
+                # print(targetStore_df_1.head(10))
+
+                targetStore_df = pd.read_sql_query("SELECT Target, TargetStore FROM [dbo].[vTawaPOSBatchTarget_1]", conn)
+                targetStore_df['Target'] = targetStore_df['Target'].astype(str) #确保数据类型一致
+                targetStore_df['Target'] = targetStore_df['Target'].str.strip().str.upper() # 将Target转换为大写并去掉前后空格
+
+                # print(targetStore_df.head(10))
+
+                promo_last_df = pd.read_sql_query("SELECT Article, UPC, PromotionPrice, StartDate, EndDate, Target, Target_Store, Filename FROM [dbo].[vTawaPOSBatchInfo_TargetStore]", conn)
+                promo_last_df = promo_last_df.rename(columns={
+                                'PromotionPrice': 'last_PromoPrice',
+                                'StartDate': 'last_StartDate',
+                                'EndDate': 'last_EndDate',
+                                'Target_Store': 'TargetStore'
+                                })
+                promo_last_df['UPC'] = promo_last_df['UPC'].astype(str)
+                # print(promo_last_df.columns)
+                # print(list(promo_last_df.columns))
+
+                promo_last_df = promo_last_df[['UPC', 'Target', 'TargetStore', 'last_PromoPrice', 'last_StartDate', 'last_EndDate', 'Filename']]
+                # print(promo_last_df.head(10))
+                # print(list(promo_batch_df.columns))
+                
+                extracted_1 = pd.merge(promo_batch_df, master_data_df, on="UPC", how="left", indicator=True)
+                # 只填充那些在 merge 时没有找到匹配的 UPC 的行（即 '_merge' 列为 'left_only' 的行）
+
+                extracted_1.loc[extracted_1['_merge'] == 'left_only', 'DescrEN'] = 'This Item can not be found!'
+                extracted_1.loc[extracted_1['_merge'] == 'left_only', 'DescrZH'] = '这个Item找不到！'
+                # 删除 '_merge' 列，保持 DataFrame 整洁
+                extracted_1.drop(columns='_merge', inplace=True)
+                # print(extracted_1.head(15))
+                
+
+                extracted_2 = pd.merge(extracted_1, targetStore_df, on="Target", how="left")
+                # print(list(extracted_2.columns))
+                # print(extracted_2.head(15))
+
+                extracted_2['UPC'] = extracted_2['UPC'].astype(str)
+                promo_last_df['UPC'] = promo_last_df['UPC'].astype(str)
+
+                extracted_2['Target'] = extracted_2['Target'].astype(str)
+                promo_last_df['Target'] = promo_last_df['Target'].astype(str)
+
+                extracted_2['TargetStore'] = extracted_2['TargetStore'].astype(str)
+                promo_last_df['TargetStore'] = promo_last_df['TargetStore'].astype(str)
+
+                extracted_3 = pd.merge(extracted_2, promo_last_df, on=['UPC','Target','TargetStore'], how = 'left')
+                # print(extracted_3.head(15))
+
+                extracted_3['StartDate'] = pd.to_datetime(extracted_3['StartDate'], errors='coerce')
+                extracted_3['EndDate'] = pd.to_datetime(extracted_3['EndDate'], errors='coerce')
+                extracted_3['last_StartDate'] = pd.to_datetime(extracted_3['last_StartDate'], errors='coerce')
+                extracted_3['last_EndDate'] = pd.to_datetime(extracted_3['last_EndDate'], errors='coerce')
+                # print(extracted_3.head(10))
+                # print(list(extracted_3.columns))
+
+                def overlap_check(row):
+                    start1, end1, start2, end2 = row['last_StartDate'], row['last_EndDate'], row['StartDate'], row['EndDate']
+                    
+                    # 判断是否重叠
+                    if end1 >= start2 and start1 <= end2:
+                        # 存在重叠，计算重叠部分的起止时间
+                        overlap_start = max(start1, start2)
+                        overlap_end = min(end1, end2)
+                        # 将时间格式化为 %m/%d/%Y 格式
+                        overlap_start_str = overlap_start.strftime('%m/%d/%Y')
+                        overlap_end_str = overlap_end.strftime('%m/%d/%Y')
+                        return pd.Series(['YES', f'{overlap_start_str}, {overlap_end_str}'])
+                    else:
+                        # 没有重叠
+                        return pd.Series(['NO', None])
+
+                # 应用函数，生成新列
+                extracted_3[['if_overlap', 'overlap_period']] = extracted_3.apply(overlap_check, axis=1)
+
+                extracted_3 = extracted_3[['Article','UPC','DescrEN','DescrZH','PromotionPrice','Qty','PkSize','StartDate','EndDate','Target','TargetStore','CheckDigit',
+                                           'Note','Mix Match','PkgPrice','PkgQty','last_PromoPrice', 'last_StartDate', 'last_EndDate', 'if_overlap', 'overlap_period', 'Filename']]
+
+                # 去重，基于UPC列，保留每个UPC的第一条记录
+                unique_extracted = extracted_3.drop_duplicates(subset=['UPC'])
+
+                # 计算 C1, C2, C3
+                C1 = unique_extracted[~unique_extracted['DescrEN'].isin(['This Item can not be found!'])].shape[0]  # 匹配到的UPC个数
+                C2 = unique_extracted[unique_extracted['if_overlap'] == 'YES'].shape[0]  # overlap个数
+                C3 = unique_extracted[unique_extracted['DescrEN'] == 'This Item can not be found!'].shape[0]  # 找不到的UPC个数
+
+                # 更新标签 (Update the existing label)
+                self.match_result_label.config(text=f"Match UPC 已完成，已Match了 {C1} 个UPC, 已發現 {C2} 个overlap，有 {C3} 个UPC 找不到。")
+                # match_status_label = tk.Label(self.root, text=f"Match UPC 已完成，已Match了 {C1} 个UPC, 已发现 {C2} 个overlap，有 {C3} 个UPC 找不到。", font=("Helvetica", 10), fg="blue")
+                # match_status_label.pack(pady=5)
+
+                # 输出结果
+                # print(extracted_3.head(10))
+
+                extracted_3['StartDate'] = extracted_3['StartDate'].dt.strftime('%m/%d/%Y')
+                extracted_3['EndDate'] = extracted_3['EndDate'].dt.strftime('%m/%d/%Y')
+                extracted_3['last_StartDate'] = extracted_3['last_StartDate'].dt.strftime('%m/%d/%Y')
+                extracted_3['last_EndDate'] = extracted_3['last_EndDate'].dt.strftime('%m/%d/%Y')
+                # print(list(extracted_3.columns))
+                # print(extracted_3.head(10))
+
+                conn.close()
+
+                # 使用UPC进行合并
+                self.extracted_data = extracted_3
+                messagebox.showinfo("Match Complete", "UPC matching is complete.\nYou can go to Step3 now!")
+            else:
+                messagebox.showerror("Error", "Unable to connect to the database.")
+        except Exception as e:
+            print("This is the error: " + str(e))
+            # traceback.print_exc()  # 打印完整的堆栈跟踪信息
+            messagebox.showerror("Error", f"An error occurred during matching: {e}")
+
+    def download_file(self):
+        if self.extracted_data is None or self.promo_batch_df1 is None:
+            messagebox.showwarning("No Data", "No data to download. Please match UPCs first.")
+            return
+
+        # 选择保存文件的路径
+        save_path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel files", "*.xlsx *.xls")])
+        if save_path:
+            try:
+                # 确保列名一致，去除两端空格
+                self.promo_batch_df1.columns = self.promo_batch_df1.columns.str.strip()
+                self.extracted_data.columns = self.extracted_data.columns.str.strip()
+
+                # 将 Target 列转换为字符串，确保类型一致
+                self.promo_batch_df1['Target'] = self.promo_batch_df1['Target'].astype(str)
+                self.extracted_data['Target'] = self.extracted_data['Target'].astype(str)
+
+                self.promo_batch_df1['UPC'] = self.promo_batch_df1['UPC'].astype(str)
+                self.extracted_data['UPC'] = self.extracted_data['UPC'].astype(str)
+
+                self.promo_batch_df1['Start Date'] = pd.to_datetime(self.promo_batch_df1['Start Date'], errors='coerce')
+                self.promo_batch_df1['End Date'] = pd.to_datetime(self.promo_batch_df1['End Date'], errors='coerce')
+
+
+                self.promo_batch_df1['Start Date'] = self.promo_batch_df1['Start Date'].dt.strftime('%m/%d/%Y')
+                self.promo_batch_df1['End Date'] = self.promo_batch_df1['End Date'].dt.strftime('%m/%d/%Y')
+
+                # print(self.promo_batch_df1.head(10))
+                # 对 extracted_data 基于 UPC 和 Target 去重，并存入另一个 DataFrame
+                deduped_extracted_data = self.extracted_data.drop_duplicates(subset=['UPC', 'Target'])
+                # print(deduped_extracted_data.head(10))
+
+                # 使用 UPC 和 Target 作为键，将 promo_batch_df1 的五列替换为 extracted_data 中的对应列
+                self.promo_batch_df1 = self.promo_batch_df1.merge(
+                    deduped_extracted_data[['UPC', 'Target', 'Article', 'DescrEN', 'DescrZH', 'PkSize', 'CheckDigit']],
+                    on=['UPC', 'Target'],
+                    how='left',
+                    suffixes=('', '_new')
+                )
+                # print(self.promo_batch_df1.head(10))
+
+                # 将 promo_batch_df1 中的相关列替换为 extracted_data 中的新值
+                self.promo_batch_df1['Article'] = self.promo_batch_df1['Article_new']
+                self.promo_batch_df1['Description'] = self.promo_batch_df1['DescrEN']
+                # print(self.promo_batch_df1.head(10))
+                self.promo_batch_df1['Chinese Decription'] = self.promo_batch_df1['DescrZH']
+                self.promo_batch_df1['PkSize'] = self.promo_batch_df1['PkSize_new']
+                self.promo_batch_df1['CheckDigit'] = self.promo_batch_df1['CheckDigit_new']
+
+                # 删除不需要的临时列
+                self.promo_batch_df1.drop(columns=['Article_new', 'DescrEN', 'DescrZH', 'PkSize_new', 'CheckDigit_new'], inplace=True)
+
+                # print(list(self.promo_batch_df1.columns))
+                # print(list(self.extracted_data.columns))
+                # print(self.promo_batch_df1.head(10))
+                # 创建一个新的Excel工作簿
+                wb = Workbook()
+                ws1 = wb.active
+                ws1.title = "Sheet1"
+
+                # 写入 promo_batch_df1 的标题行
+                
+                ws1.append(self.promo_batch_df1.columns.tolist())  # 使用 promo_batch_df1 的标题
+                # print(self.promo_batch_df1.head(10))
+
+                 # 浅绿色填充
+                green_fill = PatternFill(start_color='CCFFCC', end_color='CCFFCC', fill_type='solid')
+
+                # 遍历 promo_batch_df1 的每一行
+                highlight_fill = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
+                # 设置红色字体
+                red_font = Font(color="FF0000")  # 红色字体
+
+                for index, row in self.promo_batch_df1.iterrows():
+                    # 写入行数据  # 保持原有行数据
+                    ws1.append(row.tolist())
+                        # 如果找不到的 UPC，设置对应单元格为红色字体
+                    if row['Description'] == 'This Item can not be found!':
+                        ws1.cell(row=ws1.max_row, column=3).font = red_font  # des_en 列
+                    if row['Chinese Decription'] == '这个Item找不到！':
+                        ws1.cell(row=ws1.max_row, column=4).font = red_font  # des_zh 列
+
+
+                     # 检查在 extracted_data 中是否存在相同的 UPC 和 Target 且 if_overlap 为 "YES"
+                    condition = self.extracted_data[(self.extracted_data['UPC'] == row['UPC']) & 
+                                                     (self.extracted_data['Target'] == row['Target']) & 
+                                                     (self.extracted_data['if_overlap'] == 'YES')]
+                    
+                    # 如果条件满足，设置该行高亮
+                    # ws1.append(row.tolist()) 
+                    if not condition.empty:  # 如果有满足条件的
+                        for col in range(1, len(row) + 1):
+                            ws1.cell(row=ws1.max_row, column=col).fill = highlight_fill 
+                    
+                    # 获取最新写入的行号
+                    current_row = ws1.max_row
+                    # 高亮替换过的五个列 (Article, Description, Chinese Decription, PkSize, CheckDigit) 为浅绿色
+                    columns_to_highlight = ['Article', 'Description', 'Chinese Decription', 'PkSize', 'CheckDigit']
+                    for col_name in columns_to_highlight:
+                        col_idx = self.promo_batch_df1.columns.get_loc(col_name) + 1  # 获取列的索引，Excel 中从 1 开始
+                        ws1.cell(row=current_row, column=col_idx).fill = green_fill
+
+
+
+                # 创建第二个工作表并写入 extracted_3
+                ws2 = wb.create_sheet(title="Sheet2")
+
+                # 将 extracted_3 直接写入 ws2
+                for row in dataframe_to_rows(self.extracted_data, index=False, header=True):
+                    ws2.append(row)
+
+                # 保存文件
+                wb.save(save_path)
+
+                self.download_result_label.config(text=f"請查看sheet1為原始文件，綠色欄位表示已經更新的信息，黃色高亮行為存在Overlap的行；詳細Overlap狀態請查看sheet2。")
+
+                messagebox.showinfo("Download Complete", f"File successfully downloaded: {save_path}")
+            except Exception as e:
+                # print("This is the error: " + str(e))
+                messagebox.showerror("Error", f"An error occurred while saving the file: {e}")
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = DataMatcherApp(root)
+    root.mainloop()
+
+
